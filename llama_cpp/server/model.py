@@ -7,8 +7,10 @@ from typing import Dict, Optional, Union, List
 import llama_cpp
 import llama_cpp.llama_speculative as llama_speculative
 import llama_cpp.llama_tokenizer as llama_tokenizer
+import llama_cpp.llama_chat_format as llama_chat_format
 
 from llama_cpp.server.settings import ModelSettings
+from llama_cpp.llama_chat_format import LlamaChatCompletionHandler
 
 
 class LlamaProxy:
@@ -170,6 +172,8 @@ class LlamaProxy:
             chat_handler = llama_cpp.llama_chat_format.hf_tokenizer_config_to_chat_completion_handler(
                 json.load(open(settings.hf_tokenizer_config_path))
             )
+        elif settings.chat_format == "llama-3-custom":
+            chat_handler = _build_llama_3_custom_chat_handler()
 
         tokenizer: Optional[llama_cpp.BaseLlamaTokenizer] = None
         if settings.hf_pretrained_model_name_or_path is not None:
@@ -274,3 +278,45 @@ class LlamaProxy:
                 cache = llama_cpp.LlamaRAMCache(capacity_bytes=settings.cache_size)
             _model.set_cache(cache)
         return _model
+
+
+def _build_llama_3_custom_chat_handler() -> LlamaChatCompletionHandler:
+    bos_token = "<|begin_of_text|>"
+
+    eos_token_id = 128001
+    eos_token = "<|end_of_text|>"
+
+    template = """
+        {%- set ns = namespace(found=false) -%}
+        {%- for message in messages -%}
+            {%- if message['role'] == 'system' -%}
+                {%- set ns.found = true -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if not ns.found -%}
+            {{- '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n' + 'You are a virtual companion' + '<|eot_id|>' -}}
+        {%- endif %}
+        {%- for message in messages %}
+            {%- if message['role'] == 'system' -%}
+                {{- '<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' -}}
+            {%- else -%}
+                {%- if message['role'] == 'user' -%}
+                    {{- '<|start_header_id|>user<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>'-}}
+                {%- else -%}
+                    {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' + message['content'] + '<|eot_id|>' -}}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if add_generation_prompt -%}
+            {{- '<|start_header_id|>assistant<|end_header_id|>\n\n' -}}
+        {%- endif -%}
+    """
+
+    formatter = llama_chat_format.Jinja2ChatFormatter(
+        template=template,
+        eos_token=eos_token,
+        bos_token=bos_token,
+        stop_token_ids=[eos_token_id],
+    )
+
+    return formatter.to_chat_handler()
